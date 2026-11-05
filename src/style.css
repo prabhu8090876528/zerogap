@@ -197,3 +197,8 @@
  .welcome-footer{padding:16px 15px;flex-wrap:wrap}.welcome-footer>span{display:none}
 }
 @media(prefers-reduced-motion:reduce){.welcome-page *{scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important}}
+
+.model-facts{display:grid;gap:7px;margin:12px 0;padding:11px;background:#f7f8fc;border:1px solid #eceef4;border-radius:8px}
+.model-facts span{font-size:8px;line-height:1.55;color:#858ea1}
+.model-facts b{display:block;color:#56617b;font-size:8px;margin-bottom:2px}
+@media(max-width:640px){.model-facts{padding:9px}.model-facts span{font-size:7px}}
