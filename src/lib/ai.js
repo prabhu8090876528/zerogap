@@ -17,13 +17,14 @@ export async function detectLocalModel() {
   }
 }
 
-export async function connectLocalModel(onProgress = () => {}) {
+export async function connectLocalModel(onProgress = () => {}, signal) {
   if (!('LanguageModel' in window)) throw new Error('This browser does not support the on-device Prompt API.')
   const modelOptions = { expectedInputs:[{type:'text',languages:['en']}], expectedOutputs:[{type:'text',languages:['en']}] }
   const status = await window.LanguageModel.availability(modelOptions)
   if (status === 'unavailable') throw new Error('The browser reports that this device cannot run the local model. Smart Mode remains available.')
   localSession = await window.LanguageModel.create({
     ...modelOptions,
+    signal,
     monitor(monitor) {
       monitor.addEventListener('downloadprogress', event => onProgress(Math.round((event.loaded || 0) * 100)))
     },
