@@ -3,26 +3,24 @@ import { DEMO_QUESTIONS } from '../data/content.js'
 let localSession = null
 
 export async function detectLocalModel() {
-  if (!('LanguageModel' in window)) return { status:'unsupported', label:'Not supported on this browser', reason:'This browser does not expose an on-device language model API.' }
+  if (!('LanguageModel' in window)) return { status:'unsupported', label:'Not supported on this browser', reason:'This browser does not expose the on-device Prompt API.' }
   try {
-    const status = await window.LanguageModel.availability({
-      expectedInputs:[{ type:'text', languages:['en'] }],
-      expectedOutputs:[{ type:'text', languages:['en'] }],
-    })
-    if (status === 'available') return { status:'available', label:'On-device AI ready', reason:'A browser-provided language model is available locally.' }
-    if (status === 'downloadable') return { status:'downloadable', label:'Model download needed', reason:'A compatible local model can be prepared after you choose to enable it.' }
-    if (status === 'downloading') return { status:'downloading', label:'Model downloading', reason:'The browser is preparing its local model.' }
-    return { status:'unsupported', label:'Not supported on this device', reason:'The browser reports that this device cannot run the local model.' }
+    // Check capability first. Never call create() just to probe availability.
+    const status = await window.LanguageModel.availability()
+    if (status === 'available') return { status:'available', label:'On-device AI available', reason:'The browser reports that its local language model is ready on this device.' }
+    if (status === 'downloadable') return { status:'downloadable', label:'Model download needed', reason:'The browser reports that a local model can be prepared after you explicitly choose to enable it.' }
+    if (status === 'downloading') return { status:'downloading', label:'Model downloading', reason:'The browser is already preparing its local model.' }
+    return { status:'unsupported', label:'Not supported on this device', reason:'The browser reports that the local model is unavailable on this device.' }
   } catch (error) {
     return { status:'unsupported', label:'Local AI unavailable', reason:error?.message || 'The browser did not allow the local model check.' }
   }
 }
 
 export async function connectLocalModel(onProgress = () => {}) {
-  if (!('LanguageModel' in window)) throw new Error('This browser does not support its built-in local language model API.')
+  if (!('LanguageModel' in window)) throw new Error('This browser does not support the on-device Prompt API.')
+  const status = await window.LanguageModel.availability()
+  if (status === 'unavailable') throw new Error('The browser reports that this device cannot run the local model. Smart Mode remains available.')
   localSession = await window.LanguageModel.create({
-    expectedInputs:[{ type:'text', languages:['en'] }],
-    expectedOutputs:[{ type:'text', languages:['en'] }],
     monitor(monitor) {
       monitor.addEventListener('downloadprogress', event => onProgress(Math.round((event.loaded || 0) * 100)))
     },
