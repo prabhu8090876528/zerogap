@@ -14,13 +14,16 @@ const NAV = [
 const cx = (...values) => values.filter(Boolean).join(' ')
 const fmtDate = value => value ? new Date(value).toLocaleDateString('en-IN', { day:'numeric', month:'short' }) : 'Not set'
 const dueLabel = value => { const diff=Math.ceil((value-Date.now())/86400000); return diff<=0?'Due now':diff===1?'Tomorrow':'In '+diff+' days' }
-const pathSubjects = (level, goals) => {
-  if (goals?.includes('JEE Main') || goals?.includes('JEE Advanced')) return SUBJECTS_BY_PATH.JEE
-  if (goals?.includes('NEET')) return SUBJECTS_BY_PATH.NEET
-  if (goals?.includes('CUET')) return SUBJECTS_BY_PATH.CUET
-  return SUBJECTS_BY_PATH.school[level] || SUBJECTS_BY_PATH.Other
+const pathSubjects = (level, goals = []) => {
+  const subjects = []
+  if (goals.includes('School / Board') || goals.length === 0) subjects.push(...(SUBJECTS_BY_PATH.school[level] || []))
+  if (goals.includes('JEE Main') || goals.includes('JEE Advanced')) subjects.push(...SUBJECTS_BY_PATH.JEE)
+  if (goals.includes('NEET')) subjects.push(...SUBJECTS_BY_PATH.NEET)
+  if (goals.includes('CUET')) subjects.push(...SUBJECTS_BY_PATH.CUET)
+  if (goals.includes('Other')) subjects.push(...SUBJECTS_BY_PATH.Other)
+  return [...new Set(subjects.length ? subjects : (SUBJECTS_BY_PATH.school[level] || SUBJECTS_BY_PATH.Other))]
 }
-function Button({ children, variant='primary', className='', ...props }) { return <button className={cx('btn','btn-'+variant,className)} {...props}>{children}</button> }
+function Button({ children, variant='primary', className='', block=false, type='button', ...props }) { return <button type={type} className={cx('btn','btn-'+variant,block&&'btn-block',className)} {...props}>{children}</button> }
 function SectionTitle({ eyebrow, title, description, action }) { return <div className="section-title"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description&&<p>{description}</p>}</div>{action}</div> }
 function EmptyState({ icon='✳', title, text, action }) { return <div className="empty-state"><div className="empty-icon">{icon}</div><strong>{title}</strong><p>{text}</p>{action}</div> }
 function Metric({ label, value, note, icon, tint='blue' }) { return <article className="metric-card"><div className="metric-head"><span>{label}</span><i className={'metric-icon '+tint}>{icon}</i></div><strong>{value}</strong><small>{note}</small></article> }
@@ -198,7 +201,7 @@ function App() {
       return
     }
     if(localAIReady){
-      askLocalModel(clean||('Please '+action+' my study records.'),{...profile,language:profile?.language||'English'}).then(answer=>setAgentMessages(m=>[...m,{role:'assistant',text:answer,title:'On-device AI',mode:'On-device AI'}])).catch(error=>setAgentMessages(m=>[...m,{role:'assistant',text:error.message,title:'Local AI unavailable',mode:'Smart Mode fallback'}]))
+      askLocalModel((clean||('Please '+action+' my study records.'))+'\\n\\nUse these private local study records as supporting context only: '+JSON.stringify({dueRevisions:dueRevisions.slice(0,8).map(r=>({topic:r.topic,subject:r.subject,dueAt:r.dueAt})),openMistakes:data.mistakes.filter(m=>!m.resolved).slice(-8).map(m=>({topic:m.topic,subject:m.subject,mistakeType:m.mistakeType,reflection:m.reflection})),recentAttempts:data.attempts.slice(-12).map(a=>({topic:a.topic,subject:a.subject,correct:a.correct,confidence:a.confidence}))}),{...profile,language:profile?.language||'English'}).then(answer=>setAgentMessages(m=>[...m,{role:'assistant',text:answer,title:'On-device AI',mode:'On-device AI'}])).catch(error=>setAgentMessages(m=>[...m,{role:'assistant',text:error.message,title:'Local AI unavailable',mode:'Smart Mode fallback'}]))
     }else{
       const reply=smartStudyReply({prompt:clean,action,profile,attempts:data.attempts,mistakes:data.mistakes,revisions:data.revisions})
       setAgentMessages(m=>[...m,{role:'assistant',...reply,mode:'Smart Mode'}])
