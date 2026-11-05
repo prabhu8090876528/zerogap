@@ -1,0 +1,12 @@
+{
+  "name": "GapZero - Find your gaps. Master every concept.",
+  "short_name": "GapZero",
+  "description": "A free, local-first learning workspace for focused study, revision and practice.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f5f6fa",
+  "theme_color": "#f5f6fa",
+  "orientation": "portrait-primary",
+  "icons": []
+}
