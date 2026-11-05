@@ -3,8 +3,10 @@ import { REVISION_INTERVALS } from '../data/content.js'
 export function getTopicEvidence(attempts) {
   const byTopic = new Map()
   for (const attempt of attempts) {
-    const key = attempt.topic || 'Uncategorised'
-    const current = byTopic.get(key) || { topic:key, subject:attempt.subject || 'General', distinct:new Map(), attempts:0, lastAttempt:0 }
+    const topic = attempt.topic || 'Uncategorised'
+    const subject = attempt.subject || 'General'
+    const key = subject + '::' + topic
+    const current = byTopic.get(key) || { topic, subject, distinct:new Map(), attempts:0, lastAttempt:0 }
     current.attempts += 1
     if (!current.distinct.has(attempt.questionId) || current.distinct.get(attempt.questionId).date < attempt.date) current.distinct.set(attempt.questionId, attempt)
     current.lastAttempt = Math.max(current.lastAttempt, attempt.date || 0)
@@ -24,7 +26,7 @@ export function nextRevision({ currentInterval = 1, result = 'good', confidence 
   let index = REVISION_INTERVALS.indexOf(currentInterval)
   if (index < 0) index = 0
   if (result === 'incorrect' || result === 'again') index = 0
-  else if (result === 'hard' || confidence === 'guessing') index = Math.max(0, index)
+  else if (result === 'hard' || confidence === 'guessing') index = Math.max(0, index - 1)
   else if (result === 'easy' && confidence === 'sure') index = Math.min(REVISION_INTERVALS.length - 1, index + 2)
   else index = Math.min(REVISION_INTERVALS.length - 1, index + 1)
   const days = REVISION_INTERVALS[index]
