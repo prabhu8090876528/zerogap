@@ -37,7 +37,24 @@ export async function loadWorkspace() {
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE, 'readonly')
       const request = tx.objectStore(STORE).get(RECORD_KEY)
-      request.onsuccess = () => resolve(request.result ? { ...EMPTY_WORKSPACE, ...request.result } : { ...EMPTY_WORKSPACE })
+      request.onsuccess = () => {
+        if (request.result) return resolve({ ...EMPTY_WORKSPACE, ...request.result })
+        let legacy = null
+        try { legacy = JSON.parse(localStorage.getItem('gapzero-v1') || 'null') } catch {}
+        if (!legacy) return resolve({ ...EMPTY_WORKSPACE })
+        const migrateId = value => String(value ?? crypto.randomUUID())
+        const migrated = {
+          ...EMPTY_WORKSPACE,
+          attempts: (legacy.attempts || []).map(item => ({ ...item, id:migrateId(item.id), questionId:String(item.questionId), topic:item.topic || 'Uncategorised', date:item.date || Date.now() })),
+          revisions: (legacy.revisions || []).map(item => ({ ...item, id:migrateId(item.id), topic:item.topic || item.title || 'Untitled topic', subject:item.subject || 'General', dueAt:item.dueAt || item.due || Date.now(), intervalDays:item.intervalDays || item.interval || 1, reason:item.reason || 'Migrated from previous workspace', reviewCount:item.reviewCount || 0 })),
+          mistakes: (legacy.mistakes || []).map(item => ({ ...item, id:migrateId(item.id), topic:item.topic || item.title || 'Uncategorised', explanation:item.explanation || item.detail || 'Review the related concept.', date:item.date || Date.now(), resolved:!!item.resolved, mistakeType:item.mistakeType || 'Concept', reflection:item.reflection || '' })),
+          gaps: (legacy.gaps || []).map(item => ({ ...item, id:migrateId(item.id), topic:item.topic || item.title || 'Untitled topic', createdAt:item.createdAt || item.created || Date.now() })),
+        }
+        const write = db.transaction(STORE, 'readwrite')
+        write.objectStore(STORE).put(migrated, RECORD_KEY)
+        write.oncomplete = () => resolve(migrated)
+        write.onerror = () => reject(write.error || new Error('Could not migrate the previous local workspace.'))
+      }
       request.onerror = () => reject(request.error || new Error('Could not read your study data.'))
     })
   } finally { db.close() }
