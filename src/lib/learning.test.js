@@ -39,3 +39,19 @@ test('dashboard focus creates a first-practice action for an empty workspace', (
   assert.equal(actions.length, 1)
   assert.equal(actions[0].target, 'Practice Lab')
 })
+
+test('same topic title in different subjects is kept separate', () => {
+  const attempts = [
+    ...Array.from({length:5}, (_,i) => ({ questionId:'physics-'+i, topic:'Vectors', subject:'Physics', correct:true, date:i+1 })),
+    ...Array.from({length:5}, (_,i) => ({ questionId:'maths-'+i, topic:'Vectors', subject:'Mathematics', correct:false, date:i+1 })),
+  ]
+  const rows = getTopicEvidence(attempts)
+  assert.equal(rows.length, 2)
+  assert.equal(rows.find(x => x.subject === 'Physics').status, 'Strong')
+  assert.equal(rows.find(x => x.subject === 'Mathematics').status, 'Needs attention')
+})
+
+test('hard recall moves back one interval step', () => {
+  const result = nextRevision({ currentInterval:14, result:'hard', confidence:'somewhat', now:0 })
+  assert.equal(result.intervalDays, 7)
+})
