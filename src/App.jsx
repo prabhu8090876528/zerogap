@@ -1,169 +1,271 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { CONTENT_PACK, CURRICULUM_DEMO, DEMO_QUESTIONS, MISTAKE_TYPES, SUBJECTS_BY_PATH } from './data/content.js'
+import { buildTodayFocus, getTopicEvidence, gradeQuestion, makeRevisionItem, nextRevision } from './lib/learning.js'
+import { clearWorkspace, loadWorkspace, makeBackup, mergeWorkspace, saveWorkspace, validateBackup } from './lib/storage.js'
+import { askLocalModel, connectLocalModel, detectLocalModel, endLocalModel, smartStudyReply } from './lib/ai.js'
 
-const starterQuestions = [
-  { id: 1, subject: 'Physics', topic: 'Units & Measurements', level: 'Class 11', question: 'Which of the following is a fundamental SI unit?', options: ['Newton', 'Joule', 'Kelvin', 'Pascal'], answer: 2, explain: 'Kelvin is a base SI unit. Newton, joule and pascal are derived units.' },
-  { id: 2, subject: 'Chemistry', topic: 'Some Basic Concepts', level: 'Class 11', question: 'The number of particles in one mole is approximately:', options: ['6.022 × 10²³', '3.0 × 10⁸', '9.8', '1.6 × 10⁻¹⁹'], answer: 0, explain: 'One mole contains Avogadro’s number of specified elementary entities.' },
-  { id: 3, subject: 'Maths', topic: 'Sets', level: 'Class 11', question: 'If A = {1, 2} and B = {2, 3}, then A ∩ B is:', options: ['{1, 3}', '{2}', '{1, 2, 3}', '∅'], answer: 1, explain: 'Intersection contains only the elements common to both sets.' },
+const emptyWorkspace = { schemaVersion:1, profile:null, preferences:{ language:'English', dailyRevisionCap:45 }, attempts:[], revisions:[], flashcards:[], mistakes:[], gaps:[], notes:[], bookmarks:[], activity:[] }
+const NAV = [
+  { label:'Dashboard', icon:'◫', group:'STUDY' }, { label:'Gap Finder', icon:'◎', group:'STUDY' },
+  { label:'ReviseOS', icon:'↻', group:'STUDY' }, { label:'AI Study Agent', icon:'✳', group:'STUDY' },
+  { label:'Practice Lab', icon:'▤', group:'STUDY' }, { label:'Mistake Notebook', icon:'✎', group:'INSIGHTS' },
+  { label:'Analytics', icon:'⌁', group:'INSIGHTS' }, { label:'Settings & Backup', icon:'⚙', group:'SYSTEM' },
 ]
-
-const initial = {
-  name: '',
-  goals: [],
-  attempts: [],
-  revisions: [],
-  mistakes: [],
-  gaps: [],
-  streak: 0,
-  lastActive: '',
+const cx = (...values) => values.filter(Boolean).join(' ')
+const fmtDate = value => value ? new Date(value).toLocaleDateString('en-IN', { day:'numeric', month:'short' }) : 'Not set'
+const dueLabel = value => { const diff=Math.ceil((value-Date.now())/86400000); return diff<=0?'Due now':diff===1?'Tomorrow':'In '+diff+' days' }
+const pathSubjects = (level, goals) => {
+  if (goals?.includes('JEE Main') || goals?.includes('JEE Advanced')) return SUBJECTS_BY_PATH.JEE
+  if (goals?.includes('NEET')) return SUBJECTS_BY_PATH.NEET
+  if (goals?.includes('CUET')) return SUBJECTS_BY_PATH.CUET
+  return SUBJECTS_BY_PATH.school[level] || SUBJECTS_BY_PATH.Other
 }
+function Button({ children, variant='primary', className='', ...props }) { return <button className={cx('btn','btn-'+variant,className)} {...props}>{children}</button> }
+function SectionTitle({ eyebrow, title, description, action }) { return <div className="section-title"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1>{description&&<p>{description}</p>}</div>{action}</div> }
+function EmptyState({ icon='✳', title, text, action }) { return <div className="empty-state"><div className="empty-icon">{icon}</div><strong>{title}</strong><p>{text}</p>{action}</div> }
+function Metric({ label, value, note, icon, tint='blue' }) { return <article className="metric-card"><div className="metric-head"><span>{label}</span><i className={'metric-icon '+tint}>{icon}</i></div><strong>{value}</strong><small>{note}</small></article> }
+function Tag({ children, tone='neutral' }) { return <span className={'tag tag-'+tone}>{children}</span> }
 
-function readData() {
-  try {
-    const saved = localStorage.getItem('gapzero-v1')
-    return saved ? { ...initial, ...JSON.parse(saved) } : initial
-  } catch {
-    return initial
+function Onboarding({ initialProfile, onComplete, onSkip }) {
+  const [step,setStep]=useState(0)
+  const [profile,setProfile]=useState(()=>({classLevel:'Class 11',board:'CBSE',examGoals:['School / Board','JEE Main','JEE Advanced'],subjects:['Physics','Chemistry','Mathematics'],studyMinutes:'90',examDate:'',language:'English',...(initialProfile||{})}))
+  const [customSubject,setCustomSubject]=useState('')
+  const classLevels=['Class 6','Class 7','Class 8','Class 9','Class 10','Class 11','Class 12']
+  const goalOptions=['School / Board','JEE Main','JEE Advanced','NEET','CUET','Other']
+  const availableSubjects=useMemo(()=>pathSubjects(profile.classLevel,profile.examGoals),[profile.classLevel,profile.examGoals])
+  function patch(values){setProfile(p=>({...p,...values}))}
+  function toggleGoal(goal){
+    const next=profile.examGoals.includes(goal)?profile.examGoals.filter(x=>x!==goal):[...profile.examGoals,goal]
+    const candidates=pathSubjects(profile.classLevel,next)
+    patch({examGoals:next,subjects:profile.subjects.filter(s=>candidates.includes(s)).length?profile.subjects.filter(s=>candidates.includes(s)):candidates.slice(0,Math.min(3,candidates.length))})
   }
+  function toggleSubject(subject){patch({subjects:profile.subjects.includes(subject)?profile.subjects.filter(x=>x!==subject):[...profile.subjects,subject]})}
+  function addSubject(){const value=customSubject.trim();if(value&&!profile.subjects.includes(value))patch({subjects:[...profile.subjects,value]});setCustomSubject('')}
+  function finish(){onComplete({...profile,examGoals:profile.examGoals.length?profile.examGoals:['School / Board'],subjects:profile.subjects.length?profile.subjects:availableSubjects.slice(0,2),studyMinutes:profile.studyMinutes==='Not sure yet'?null:Number(profile.studyMinutes)})}
+  return <main className="onboarding-page">
+    <div className="onboard-top"><a className="brand" href="#"><span className="brand-symbol">G<span>·</span></span><span>GapZero<small>LEARN WITH CLARITY</small></span></a><div className="onboard-top-right"><Tag tone="green">Free · No account</Tag><button className="text-action" onClick={onSkip}>Skip setup</button></div></div>
+    <div className="onboard-layout"><div className="onboard-copy"><div className="eyebrow">YOUR PERSONAL LEARNING SPACE</div><h1>Find the gaps.<br/><em>Build the edge.</em></h1><p>One focused workspace for concept clarity, smart revision and deliberate practice. Start by telling GapZero what you are preparing for.</p><div className="onboard-points"><div><span>01</span><div><strong>Your path, your subjects</strong><small>Class, board and exam goals shape your workspace.</small></div></div><div><span>02</span><div><strong>A plan that adapts</strong><small>Practice and revision respond to your actual attempts.</small></div></div><div><span>03</span><div><strong>Your data stays yours</strong><small>No sign-up. Study records stay in this browser.</small></div></div></div></div>
+      <section className="onboard-card"><div className="onboard-progress"><div className="progress-label"><span>SET UP YOUR WORKSPACE</span><b>STEP {step+1} OF 3</b></div><div className="progress-track"><i style={{width:((step+1)/3*100)+'%'}}/></div></div>
+        {step===0&&<div className="onboard-step"><div className="step-heading"><span className="step-number">01</span><div><h2>What are you studying?</h2><p>Choose your current class and education board.</p></div></div><label className="field-label" htmlFor="class-level">Class / level</label><select id="class-level" className="field-control field-large" value={classLevels.includes(profile.classLevel)?profile.classLevel:'Class 11'} onChange={e=>{const level=e.target.value;patch({classLevel:level,subjects:pathSubjects(level,profile.examGoals).slice(0,3)})}}>{classLevels.map(x=><option key={x}>{x}</option>)}</select><label className="field-label" htmlFor="board">Board</label><select id="board" className="field-control" value={profile.board} onChange={e=>patch({board:e.target.value})}>{['CBSE','ICSE','State Board','Other','Not sure'].map(x=><option key={x}>{x}</option>)}</select><div className="field-help">Competitive-exam students can select multiple goals in the next step.</div></div>}
+        {step===1&&<div className="onboard-step"><div className="step-heading"><span className="step-number">02</span><div><h2>What are your goals?</h2><p>Select every path you are working towards.</p></div></div><div className="choice-grid">{goalOptions.map(goal=><button type="button" key={goal} className={cx('choice-tile',profile.examGoals.includes(goal)&&'chosen')} onClick={()=>toggleGoal(goal)}><span className="choice-check">{profile.examGoals.includes(goal)?'✓':'+'}</span><span>{goal}</span></button>)}</div><div className="field-row-title"><label className="field-label">Your subjects</label><span className="field-help-inline">Select all that apply</span></div><div className="subject-pills">{availableSubjects.map(subject=><button type="button" key={subject} className={cx('subject-pill',profile.subjects.includes(subject)&&'selected')} onClick={()=>toggleSubject(subject)}>{profile.subjects.includes(subject)?'✓ ':''}{subject}</button>)}</div><div className="custom-subject"><input className="field-control" placeholder="Add another subject" value={customSubject} onChange={e=>setCustomSubject(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){e.preventDefault();addSubject()}}}/><Button type="button" variant="soft" onClick={addSubject}>Add</Button></div></div>}
+        {step===2&&<div className="onboard-step"><div className="step-heading"><span className="step-number">03</span><div><h2>Make it realistic.</h2><p>Set a study rhythm that fits your day. You can change this later.</p></div></div><label className="field-label" htmlFor="study-time">Available study time each day</label><select id="study-time" className="field-control field-large" value={profile.studyMinutes} onChange={e=>patch({studyMinutes:e.target.value})}><option value="30">Around 30 minutes</option><option value="45">Around 45 minutes</option><option value="60">Around 1 hour</option><option value="90">Around 1.5 hours</option><option value="120">Around 2 hours</option><option value="180">3+ hours</option><option value="Not sure yet">Not sure yet</option></select><label className="field-label" htmlFor="exam-date">Target exam date <span className="optional">OPTIONAL</span></label><input id="exam-date" type="date" className="field-control" value={profile.examDate||''} onChange={e=>patch({examDate:e.target.value})}/><label className="field-label" htmlFor="language">Preferred language</label><select id="language" className="field-control" value={profile.language} onChange={e=>patch({language:e.target.value})}><option>English</option><option>Hinglish</option></select></div>}
+        <div className="onboard-footer"><Button variant="ghost" disabled={step===0} onClick={()=>setStep(s=>s-1)}>← Back</Button>{step<2?<Button onClick={()=>setStep(s=>s+1)}>Continue <span>→</span></Button>:<Button onClick={finish}>Create my workspace <span>→</span></Button>}</div><div className="onboard-privacy"><span>◈</span> No login. No paid API. Your learning data stays on this device.</div>
+      </section></div><div className="onboard-bottom"><span>GAPZERO <b>·</b> FIND YOUR GAPS. MASTER EVERY CONCEPT.</span><span>SET UP ONCE · EDIT ANYTIME</span></div>
+  </main>
 }
 
 function App() {
-  const [data, setData] = useState(readData)
-  const [page, setPage] = useState('Overview')
-  const [subject, setSubject] = useState('All')
-  const [questionIndex, setQuestionIndex] = useState(0)
-  const [selected, setSelected] = useState(null)
-  const [checked, setChecked] = useState(false)
-  const [topic, setTopic] = useState('')
-  const [note, setNote] = useState('')
-  const [showBackup, setShowBackup] = useState(false)
-  const [toast, setToast] = useState('')
+  const [data,setData]=useState(emptyWorkspace)
+  const [loaded,setLoaded]=useState(false)
+  const [saveStatus,setSaveStatus]=useState('loading')
+  const [screen,setScreen]=useState('Dashboard')
+  const [profileEditing,setProfileEditing]=useState(false)
+  const [mobileMenu,setMobileMenu]=useState(false)
+  const [toast,setToast]=useState('')
+  const [session,setSession]=useState(null)
+  const [sessionResult,setSessionResult]=useState(null)
+  const [agentMessages,setAgentMessages]=useState([])
+  const [agentInput,setAgentInput]=useState('')
+  const [agentAction,setAgentAction]=useState('explain')
+  const [localAI,setLocalAI]=useState({status:'checking',label:'Checking local AI',reason:''})
+  const [localAIProgress,setLocalAIProgress]=useState(null)
+  const [localAIReady,setLocalAIReady]=useState(false)
+  const [backupPreview,setBackupPreview]=useState(null)
+  const [backupMode,setBackupMode]=useState('merge')
+  const [filters,setFilters]=useState({subject:'All',difficulty:'All',mistake:'All',status:'Open'})
+  const [gapSetup,setGapSetup]=useState({subject:'Physics',chapter:'Units & Measurements',mode:'quick'})
+  const [revisionTab,setRevisionTab]=useState('Due')
+  const [flashcardForm,setFlashcardForm]=useState({front:'',back:'',topic:'',subject:'Physics'})
+  const [showFlashcardForm,setShowFlashcardForm]=useState(false)
+  const [flippedCards,setFlippedCards]=useState({})
+  const [reflectionDrafts,setReflectionDrafts]=useState({})
+  const [clock,setClock]=useState(0)
+  const fileInput=useRef(null)
+  const agentEndRef=useRef(null)
 
-  useEffect(() => {
-    localStorage.setItem('gapzero-v1', JSON.stringify(data))
-  }, [data])
+  useEffect(()=>{
+    loadWorkspace().then(result=>{
+      setData({...emptyWorkspace,...result});setSaveStatus('saved');setLoaded(true)
+      detectLocalModel().then(setLocalAI)
+      if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{})
+    }).catch(error=>{setSaveStatus('error');setToast(error.message);setLoaded(true);detectLocalModel().then(setLocalAI)})
+  },[])
+  useEffect(()=>{
+    if(!loaded)return
+    setSaveStatus('saving')
+    const timer=window.setTimeout(()=>{saveWorkspace(data).then(()=>setSaveStatus('saved')).catch(error=>{setSaveStatus('error');setToast(error.message)})},350)
+    return()=>window.clearTimeout(timer)
+  },[data,loaded])
+  useEffect(()=>{if(!session||!session.timed||session.finishedAt)return;const timer=window.setInterval(()=>setClock(Date.now()),1000);return()=>window.clearInterval(timer)},[session?.id,session?.timed,session?.finishedAt])
+  useEffect(()=>{if(agentEndRef.current)agentEndRef.current.scrollIntoView({behavior:'smooth',block:'end'})},[agentMessages])
+  useEffect(()=>{if(toast){const timer=window.setTimeout(()=>setToast(''),3000);return()=>window.clearTimeout(timer)}},[toast])
 
-  const questions = useMemo(() => subject === 'All' ? starterQuestions : starterQuestions.filter(q => q.subject === subject), [subject])
-  const question = questions[questionIndex % Math.max(questions.length, 1)]
-  const correct = data.attempts.filter(a => a.correct).length
-  const accuracy = data.attempts.length ? Math.round(correct / data.attempts.length * 100) : 0
-  const due = data.revisions.filter(r => r.due <= Date.now()).length
+  const profile=data.profile
+  const evidence=useMemo(()=>getTopicEvidence(data.attempts),[data.attempts])
+  const dueRevisions=data.revisions.filter(r=>r.dueAt<=Date.now())
+  const upcomingRevisions=data.revisions.filter(r=>r.dueAt>Date.now())
+  const correctCount=data.attempts.filter(a=>a.correct).length
+  const accuracy=data.attempts.length?Math.round(correctCount/data.attempts.length*100):null
+  const focusItems=buildTodayFocus({profile,revisions:data.revisions,mistakes:data.mistakes,gaps:data.gaps,attempts:data.attempts})
+  const profileSubjects=profile?.subjects||[]
+  const currentQuestions=DEMO_QUESTIONS.filter(q=>(!profile||q.classLevel===profile.classLevel)&&(profileSubjects.length===0||profileSubjects.includes(q.subject)))
+  const activeQuestions=session?.questions||[]
+  const activeQuestion=activeQuestions[session?.index||0]
+  const secondsLeft=session?.timed?Math.max(0,session.timeLimit-Math.floor((Date.now()-session.startedAt)/1000)):null
 
-  function update(patch) { setData(prev => ({ ...prev, ...patch })) }
-  function notify(message) { setToast(message); window.setTimeout(() => setToast(''), 2400) }
-
-  function markAnswer() {
-    if (selected === null || checked) return
-    const isCorrect = selected === question.answer
-    const attempt = { questionId: question.id, subject: question.subject, topic: question.topic, correct: isCorrect, date: Date.now() }
-    update({
-      attempts: [...data.attempts, attempt],
-      revisions: isCorrect ? data.revisions : [...data.revisions, { id: Date.now(), title: question.topic, subject: question.subject, due: Date.now(), interval: 1 }],
-      mistakes: isCorrect ? data.mistakes : [...data.mistakes, { id: Date.now(), title: question.topic, detail: 'Review the explanation and retry this concept.', date: Date.now(), resolved: false }],
-    })
-    setChecked(true)
+  function notify(message){setToast(message)}
+  function patchData(patch){setData(d=>({...d,...patch}))}
+  function navigate(target){setScreen(target);setMobileMenu(false);setSession(null);setSessionResult(null)}
+  function completeOnboarding(nextProfile){patchData({profile:nextProfile,preferences:{...data.preferences,language:nextProfile.language||'English'}});setProfileEditing(false);setScreen('Dashboard');notify('Your learning workspace is ready')}
+  function startPractice(questions,config={}){
+    const items=[...questions]
+    if(!items.length){notify('No questions are available for this selection yet.');return}
+    setSessionResult(null)
+    setSession({id:crypto.randomUUID(),questions:items,index:0,answers:[],selected:null,confidence:'somewhat',checked:false,timed:!!config.timed,timeLimit:(config.minutes||10)*60,startedAt:Date.now(),source:config.source||'practice',title:config.title||'Practice session',finishedAt:null})
+    setClock(Date.now());setScreen('Practice Lab')
   }
-
-  function nextQuestion() {
-    setQuestionIndex(i => (i + 1) % Math.max(questions.length, 1))
-    setSelected(null)
-    setChecked(false)
+  function checkCurrentAnswer(){
+    if(!session||session.selected===null||session.checked||!activeQuestion||(session.timed&&secondsLeft<=0))return
+    const graded=gradeQuestion(activeQuestion,session.selected)
+    const attempt={id:crypto.randomUUID(),questionId:activeQuestion.id,topic:activeQuestion.topic,chapter:activeQuestion.chapter,subject:activeQuestion.subject,classLevel:activeQuestion.classLevel,selectedIndex:session.selected,correct:graded.correct,confidence:session.confidence,date:Date.now(),source:session.source}
+    let nextMistakes=data.mistakes,nextRevisions=data.revisions
+    if(!graded.correct){
+      const mistake={id:crypto.randomUUID(),questionId:activeQuestion.id,questionText:activeQuestion.prompt,selectedAnswer:activeQuestion.options[session.selected],correctAnswer:activeQuestion.options[activeQuestion.answer],explanation:activeQuestion.explanation,topic:activeQuestion.topic,chapter:activeQuestion.chapter,subject:activeQuestion.subject,mistakeType:'Concept',reflection:'',nextAction:'Review the explanation, then retry this concept.',date:Date.now(),resolved:false,reviewCount:0}
+      nextMistakes=[...data.mistakes,mistake]
+      if(!data.revisions.some(r=>r.topic===activeQuestion.topic&&r.subject===activeQuestion.subject))nextRevisions=[...data.revisions,makeRevisionItem({topic:activeQuestion.topic,subject:activeQuestion.subject,source:'mistake',reason:'Incorrect answer in practice'})]
+    }
+    patchData({attempts:[...data.attempts,attempt],mistakes:nextMistakes,revisions:nextRevisions,activity:[...data.activity,{id:crypto.randomUUID(),type:'attempt',detail:activeQuestion.topic,date:Date.now()}].slice(-200)})
+    setSession(s=>({...s,checked:true,answers:[...s.answers,attempt]}))
   }
-
-  function addGap(e) {
-    e.preventDefault()
-    if (!topic.trim()) return
-    update({ gaps: [...data.gaps, { id: Date.now(), title: topic.trim(), subject, created: Date.now() }] })
-    setTopic('')
-    notify('Gap added to your learning list')
+  function finishCurrentSession(){
+    if(!session)return
+    setSessionResult({title:session.title,answers:session.answers,questions:session.questions,wrongQuestions:session.answers.filter(a=>!a.correct).map(a=>session.questions.find(q=>q.id===a.questionId)).filter(Boolean)})
+    setSession(null)
   }
-
-  function addNote(e) {
-    e.preventDefault()
-    if (!note.trim()) return
-    update({ revisions: [...data.revisions, { id: Date.now(), title: note.trim(), subject: subject === 'All' ? 'General' : subject, due: Date.now(), interval: 1 }] })
-    setNote('')
-    notify('Added to ReviseOS')
+  function nextQuestion(){
+    if(!session)return
+    if(session.index>=session.questions.length-1||(session.timed&&secondsLeft<=0)){finishCurrentSession();return}
+    setSession(s=>({...s,index:s.index+1,selected:null,confidence:'somewhat',checked:false}))
   }
-
-  function exportBackup() {
-    const blob = new Blob([JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), data }, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'gapzero-backup.json'
-    a.click()
-    URL.revokeObjectURL(url)
+  function reviewRevision(item,result,confidence='sure'){
+    const next=nextRevision({currentInterval:item.intervalDays||1,result,confidence})
+    patchData({revisions:data.revisions.map(r=>r.id===item.id?{...r,intervalDays:next.intervalDays,dueAt:next.dueAt,lastReviewedAt:Date.now(),reviewCount:(r.reviewCount||0)+1,lastResult:result,algorithmVersion:next.algorithmVersion}:r),activity:[...data.activity,{id:crypto.randomUUID(),type:'revision',detail:item.topic,date:Date.now()}].slice(-200)})
+    notify('Next review scheduled ' + dueLabel(next.dueAt).toLowerCase())
   }
-
-  function importBackup(file) {
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      try {
-        const parsed = JSON.parse(String(reader.result))
-        const candidate = parsed.data ?? parsed
-        if (!candidate || !Array.isArray(candidate.attempts) || !Array.isArray(candidate.revisions) || !Array.isArray(candidate.mistakes)) throw new Error('Invalid backup')
-        if (!window.confirm('Restore this backup? Your current local GapZero data will be replaced.')) return
-        setData({ ...initial, ...candidate })
-        setShowBackup(false)
-        notify('Backup restored')
-      } catch { notify('That file is not a valid GapZero backup') }
+  function addFlashcard(e){
+    e.preventDefault();if(!flashcardForm.front.trim()||!flashcardForm.back.trim())return
+    patchData({flashcards:[...data.flashcards,{id:crypto.randomUUID(),...flashcardForm,createdAt:Date.now(),dueAt:Date.now(),intervalDays:1,reviewCount:0}]})
+    setFlashcardForm({front:'',back:'',topic:'',subject:profileSubjects[0]||'Physics'});setShowFlashcardForm(false);notify('Flashcard saved')
+  }
+  function rateFlashcard(card,result){
+    const next=nextRevision({currentInterval:card.intervalDays||1,result,confidence:result==='easy'?'sure':'somewhat'})
+    patchData({flashcards:data.flashcards.map(c=>c.id===card.id?{...c,dueAt:next.dueAt,intervalDays:next.intervalDays,reviewCount:(c.reviewCount||0)+1,lastReviewedAt:Date.now()}:c)})
+    setFlippedCards(f=>({...f,[card.id]:false}))
+  }
+  function saveMistake(id,patch){patchData({mistakes:data.mistakes.map(m=>m.id===id?{...m,...patch}:m)})}
+  function addGap(topic,subject){
+    if(!topic.trim())return
+    patchData({gaps:[...data.gaps,{id:crypto.randomUUID(),topic:topic.trim(),subject,createdAt:Date.now(),status:'Not tested',source:'student'}]})
+    notify('Concept added to Gap Finder')
+  }
+  function askAgent(action=agentAction,prompt=agentInput){
+    const clean=prompt.trim()
+    if(!clean&&!['plan','revise','analyze'].includes(action))return
+    const userMessage={role:'user',text:clean||action,action,date:Date.now()}
+    setAgentMessages(m=>[...m,userMessage]);setAgentInput('')
+    if(localAIReady){
+      askLocalModel(clean||('Please '+action+' my study records.'),{...profile,language:profile?.language||'English'}).then(answer=>setAgentMessages(m=>[...m,{role:'assistant',text:answer,title:'On-device AI',mode:'On-device AI'}])).catch(error=>setAgentMessages(m=>[...m,{role:'assistant',text:error.message,title:'Local AI unavailable',mode:'Smart Mode fallback'}]))
+    }else{
+      const reply=smartStudyReply({prompt:clean,action,profile,attempts:data.attempts,mistakes:data.mistakes,revisions:data.revisions})
+      setAgentMessages(m=>[...m,{role:'assistant',...reply,mode:'Smart Mode'}])
+    }
+  }
+  async function enableLocalAI(){
+    try{setLocalAI({status:'downloading',label:'Preparing local AI',reason:'The browser may download its model after this action.'});setLocalAIProgress(0);await connectLocalModel(setLocalAIProgress);setLocalAIReady(true);setLocalAI({status:'available',label:'On-device AI ready',reason:'Responses run locally in this browser session.'});notify('On-device AI is ready on this device')}
+    catch(error){setLocalAIReady(false);setLocalAI({status:'unsupported',label:'Local AI unavailable',reason:error.message});notify('Smart Mode remains available')}
+  }
+  function exportBackup(){
+    const file=new Blob([JSON.stringify(makeBackup(data),null,2)],{type:'application/json'}),url=URL.createObjectURL(file),a=document.createElement('a')
+    a.href=url;a.download='gapzero-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click();URL.revokeObjectURL(url);notify('Backup exported')
+  }
+  function inspectBackup(file){
+    if(!file)return
+    if(file.size>15*1024*1024){notify('Backup is larger than the 15 MB safety limit');return}
+    const reader=new FileReader()
+    reader.onload=()=>{
+      try{const incoming=validateBackup(JSON.parse(String(reader.result)));setBackupPreview({incoming,counts:{attempts:incoming.attempts.length,revisions:incoming.revisions.length,mistakes:incoming.mistakes.length,flashcards:incoming.flashcards.length,notes:incoming.notes.length}});setBackupMode('merge')}
+      catch(error){notify(error.message)}
     }
     reader.readAsText(file)
   }
+  function restoreBackup(){
+    if(!backupPreview)return
+    const next=backupMode==='replace'?backupPreview.incoming:mergeWorkspace(data,backupPreview.incoming)
+    patchData(next);setBackupPreview(null);notify('Backup restored. Changes are being saved on this device.')
+  }
+  async function resetWorkspace(){
+    if(!window.confirm('Delete all GapZero data in this browser? This cannot be undone without a backup.'))return
+    try{await clearWorkspace();endLocalModel();setLocalAIReady(false);setData(emptyWorkspace);setProfileEditing(false);setScreen('Dashboard');notify('Local workspace cleared')}
+    catch(error){notify(error.message)}
+  }
+  function editProfile(){setProfileEditing(true);setScreen('onboarding')}
+  function startGapDiagnostic(){
+    const items=DEMO_QUESTIONS.filter(q=>q.classLevel===profile?.classLevel&&q.subject===gapSetup.subject&&(!gapSetup.chapter||q.chapter===gapSetup.chapter))
+    startPractice(gapSetup.mode==='full'?items:items.slice(0,3),{source:'diagnostic',title:'Gap Finder diagnostic'})
+  }
+  function startFilteredPractice(){
+    const items=currentQuestions.filter(q=>(filters.subject==='All'||q.subject===filters.subject)&&(filters.difficulty==='All'||q.difficulty===filters.difficulty))
+    startPractice(items,{source:'practice',title:'Practice Lab'})
+  }
+  const weekAttempts=data.attempts.filter(a=>Date.now()-a.date<=7*86400000)
+  const weekAccuracy=weekAttempts.length?Math.round(weekAttempts.filter(a=>a.correct).length/weekAttempts.length*100):null
 
-  const nav = ['Overview', 'Gap Finder', 'ReviseOS', 'Practice Lab', 'Mistake Notebook', 'Analytics']
-  return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <a className="brand" href="#" onClick={e => { e.preventDefault(); setPage('Overview') }}><span className="brand-mark">g.</span><span>gapzero<small>LEARN WITH CLARITY</small></span></a>
-        <div className="side-label">WORKSPACE</div>
-        <nav>{nav.map((item, i) => <button key={item} className={page === item ? 'nav-item active' : 'nav-item'} onClick={() => setPage(item)}><span className="nav-icon">{['⌂', '◎', '↻', '▤', '✎', '▥'][i]}</span>{item}{item === 'ReviseOS' && due > 0 && <b className="nav-count">{due}</b>}</button>)}</nav>
-        <div className="sidebar-bottom">
-          <div className="privacy-chip"><span className="privacy-dot" /> Your data stays on this device</div>
-          <button className="nav-item" onClick={() => setShowBackup(true)}><span className="nav-icon">⚙</span>Settings & backup</button>
-          <div className="profile"><div className="avatar">S</div><div><strong>Student workspace</strong><small>Local account · No login</small></div></div>
-        </div>
-      </aside>
+  if(!loaded)return <div className="loading-screen"><div className="brand-symbol">G<span>·</span></div><div className="loading-title">Opening your learning space</div><div className="loading-sub">Reading local workspace…</div></div>
+  if(saveStatus==='error'&&!profile)return <div className="loading-screen"><div className="brand-symbol">G<span>·</span></div><h2>Local storage could not be opened</h2><p>{toast||'Check browser storage permissions and reload.'}</p><Button onClick={()=>window.location.reload()}>Try again</Button></div>
+  if(!profile||profileEditing||screen==='onboarding')return <Onboarding initialProfile={profile} onComplete={completeOnboarding} onSkip={()=>completeOnboarding({classLevel:'Not selected',board:'Not sure',examGoals:[],subjects:[],studyMinutes:null,examDate:'',language:'English'})}/>
 
-      <main className="main">
-        <header className="topbar"><div className="breadcrumb">Workspace <span>/</span> <strong>{page}</strong></div><div className="top-actions"><span className="local-pill"><i /> Local mode</span><button className="icon-button" title="Settings and backup" onClick={() => setShowBackup(true)}>⚙</button></div></header>
-        <div className="content">
-          {page === 'Overview' && <section>
-            <div className="welcome-row"><div><div className="eyebrow">YOUR LEARNING, DECODED</div><h1>Make every study session <em>count.</em></h1><p className="subhead">Find what you don’t know. Build a plan to master it.</p></div><div className="date-card"><span>YOUR LEARNING SPACE</span><strong>{new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' })}</strong></div></div>
-            <div className="stat-grid"><Stat label="Questions attempted" value={data.attempts.length} meta="Across all practice sessions" icon="▤"/><Stat label="Accuracy" value={accuracy + '%'} meta="Based on your attempts" icon="◎"/><Stat label="Topics to revise" value={due} meta="Ready for a quick review" icon="↻"/><Stat label="Concept gaps" value={data.gaps.length} meta="Topics you want to strengthen" icon="◇"/></div>
-            <div className="section-heading"><div><div className="eyebrow">PICK UP WHERE YOU LEFT OFF</div><h2>Your learning toolkit</h2></div><span className="muted">Built around your progress</span></div>
-            <div className="tool-grid">
-              <ToolCard icon="◎" tint="blue" title="Find your gaps" text="Spot weak concepts and turn them into a clear next step." action="Open Gap Finder" onClick={() => setPage('Gap Finder')} />
-              <ToolCard icon="↻" tint="violet" title="Revise with intent" text="Keep important concepts in a simple spaced-revision queue." action="Open ReviseOS" onClick={() => setPage('ReviseOS')} />
-              <ToolCard icon="▤" tint="orange" title="Practice actively" text="Test your understanding with focused questions." action="Start practicing" onClick={() => setPage('Practice Lab')} />
-            </div>
-            <div className="bottom-grid"><div className="panel"><div className="panel-head"><div><div className="eyebrow">YOUR NEXT STEPS</div><h3>Learning queue</h3></div><button className="text-button" onClick={() => setPage('ReviseOS')}>View all →</button></div>{data.revisions.length ? data.revisions.slice(0, 3).map(r => <div className="queue-row" key={r.id}><span className="queue-dot" /><div><strong>{r.title}</strong><small>{r.subject} · Due now</small></div><span className="tag">Review</span></div>) : <Empty title="Your queue is clear" text="Add a concept in ReviseOS or answer a practice question incorrectly to build your revision queue." />}</div>
-            <div className="panel insight-panel"><div className="eyebrow">A SMALL DAILY WIN</div><h3>Consistency beats cramming.</h3><p>Start with one concept you find difficult. A focused 15-minute session is a good place to begin.</p><button className="primary-button" onClick={() => setPage('Practice Lab')}>Start a practice session <span>→</span></button></div></div>
-          </section>}
+  return <div className="app-shell">
+    <aside className={cx('sidebar',mobileMenu&&'sidebar-open')}><a className="brand" href="#" onClick={e=>{e.preventDefault();navigate('Dashboard')}}><span className="brand-symbol">G<span>·</span></span><span>GapZero<small>LEARN WITH CLARITY</small></span></a>
+      <div className="sidebar-profile"><div className="profile-avatar">{profile.classLevel.replace('Class ','')}</div><div><strong>{profile.classLevel}</strong><small>{profile.examGoals.join(' · ')||profile.board}</small></div><button aria-label="Edit profile" onClick={editProfile}>⌄</button></div>
+      {['STUDY','INSIGHTS','SYSTEM'].map(group=><div className="nav-group" key={group}><div className="nav-label">{group}</div>{NAV.filter(n=>n.group===group).map(item=><button key={item.label} className={cx('nav-link',screen===item.label&&'active')} onClick={()=>navigate(item.label)}><span className="nav-link-icon">{item.icon}</span><span>{item.label}</span>{item.label==='ReviseOS'&&dueRevisions.length>0&&<b className="nav-badge">{dueRevisions.length}</b>}</button>)}</div>)}
+      <div className="sidebar-bottom"><div className="sidebar-ai"><div className="ai-spark">✳</div><div><strong>Study Agent</strong><small>{localAIReady?'On-device AI':'Smart Mode active'}</small></div><button aria-label="Open Study Agent" onClick={()=>navigate('AI Study Agent')}>→</button></div><div className="sidebar-privacy"><span>◈</span> Saved on this device</div></div>
+    </aside>
+    <main className="main-area"><header className="topbar"><button className="mobile-menu-toggle" aria-label="Open menu" onClick={()=>setMobileMenu(v=>!v)}>☰</button><div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{screen==='Dashboard'?'Overview':screen}</strong></div><div className="topbar-right"><div className={cx('save-indicator','save-'+saveStatus)}><i/>{saveStatus==='saved'?'All changes saved':saveStatus==='saving'?'Saving…':saveStatus==='loading'?'Loading…':'Save issue'}</div><button className="top-avatar" onClick={editProfile} title="Edit learning profile">{profile.classLevel.replace('Class ','')}</button></div></header>
+      <div className="page-content">
+        {screen==='Dashboard'&&<section><div className="dashboard-hero"><div className="hero-copy"><div className="eyebrow">YOUR STUDY SPACE · {new Date().toLocaleDateString('en-IN',{weekday:'long',day:'numeric',month:'long'}).toUpperCase()}</div><h1>Good to see you.<br/><em>Let’s make progress.</em></h1><p>{profile.classLevel} · {profile.board} · {profile.examGoals.join(' + ')||'Personal learning'}</p><div className="hero-actions"><Button onClick={()=>navigate('Practice Lab')}>Continue learning <span>→</span></Button><button className="hero-link" onClick={()=>navigate('Gap Finder')}>Find a concept gap <span>↗</span></button></div></div><div className="hero-art"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="hero-orb"><span>G</span><small>ZERO</small></div><div className="floating-note note-one"><b>✳</b><span>Understand<br/>then practise</span></div><div className="floating-note note-two"><b>↻</b><span>Revise with<br/>purpose</span></div></div></div>
+          <div className="metrics-grid"><Metric label="Questions attempted" value={data.attempts.length} note="Recorded practice answers" icon="▤"/><Metric label="Accuracy" value={accuracy===null?'—':accuracy+'%'} note={accuracy===null?'Complete a practice set first':'Across all recorded attempts'} icon="◎" tint="violet"/><Metric label="Due revisions" value={dueRevisions.length} note={upcomingRevisions.length+' upcoming'} icon="↻" tint="mint"/><Metric label="Open concept gaps" value={data.gaps.length} note="Topics you want to strengthen" icon="◇" tint="amber"/></div>
+          <div className="dashboard-grid"><div className="panel focus-panel"><div className="panel-heading"><div><div className="eyebrow">START WITH WHAT MATTERS</div><h2>Today’s focus</h2></div><Tag tone="blue">{focusItems.length} suggested actions</Tag></div><div className="focus-list">{focusItems.map((item,i)=><button className="focus-row" key={item.id} onClick={()=>navigate(item.target)}><span className="focus-index">0{i+1}</span><div className="focus-text"><strong>{item.label}</strong><small>{item.detail}</small></div><span className="focus-time">{item.minutes} min</span><span className="focus-arrow">→</span></button>)}</div><button className="text-action focus-plan" onClick={()=>{setScreen('AI Study Agent');setAgentAction('plan');setAgentInput('');setTimeout(()=>askAgent('plan',''),50)}}>Build a study plan with Study Agent <span>↗</span></button></div>
+            <div className="panel attention-panel"><div className="panel-heading"><div><div className="eyebrow">YOUR LEARNING SIGNALS</div><h2>Topics needing attention</h2></div><button className="icon-action" onClick={()=>navigate('Analytics')}>↗</button></div>{evidence.length?evidence.slice(0,4).map(item=><div className="attention-row" key={item.topic}><div className="attention-info"><strong>{item.topic}</strong><small>{item.subject} · {item.distinctQuestions} distinct questions</small></div><Tag tone={item.status==='Needs attention'?'red':item.status==='Strong'?'green':'amber'}>{item.status}</Tag></div>):<EmptyState icon="◌" title="No learning signals yet" text="Your topic report will appear after you answer a few distinct questions." action={<Button variant="soft" onClick={()=>navigate('Practice Lab')}>Try practice</Button>}/>}</div></div>
+          <div className="dashboard-bottom"><div className="panel"><div className="panel-heading"><div><div className="eyebrow">PICK UP WHERE YOU LEFT OFF</div><h2>Recent practice</h2></div><button className="text-action" onClick={()=>navigate('Practice Lab')}>Practice more →</button></div>{data.attempts.length?data.attempts.slice(-4).reverse().map(a=><div className="recent-row" key={a.id}><span className={cx('result-dot',a.correct?'correct':'incorrect')}>{a.correct?'✓':'×'}</span><div><strong>{a.topic}</strong><small>{a.subject} · {fmtDate(a.date)}</small></div><Tag tone={a.correct?'green':'red'}>{a.correct?'Correct':'Review'}</Tag></div>):<EmptyState title="Your first attempt starts here" text="Try the small original demonstration pack. It is not a complete syllabus or PYQ bank." action={<Button variant="soft" onClick={()=>navigate('Practice Lab')}>Open Practice Lab</Button>}/>}</div>
+            <div className="panel agent-status-panel"><div className="agent-status-head"><div className="agent-badge">✳</div><div><div className="eyebrow">YOUR BUILT-IN STUDY ASSISTANT</div><h2>AI Study Agent</h2></div></div><div className="agent-mode-line"><span className="status-pulse"/> {localAIReady?'On-device AI connected':'Smart Mode active'}</div><p>Get revision priorities and evidence-based guidance from your saved learning data. Local generative AI is optional on compatible devices.</p><Button variant="soft" onClick={()=>navigate('AI Study Agent')}>Open Study Agent <span>→</span></Button></div></div>
+        </section>}
 
-          {page === 'Gap Finder' && <section><PageIntro eyebrow="KNOW WHAT TO WORK ON" title="Find your gaps." text="Capture the concepts that feel unclear. Gap Finder turns a vague struggle into a visible learning list."/><div className="two-col"><div className="panel"><h3>Add a concept gap</h3><p className="muted">Be specific. “Newton’s third law examples” is more useful than “Physics”.</p><form onSubmit={addGap} className="stack-form"><label>Subject</label><select value={subject} onChange={e => setSubject(e.target.value)}><option>All</option><option>Physics</option><option>Chemistry</option><option>Maths</option></select><label>Concept or topic</label><input value={topic} onChange={e => setTopic(e.target.value)} placeholder="e.g. Significant figures" /><button className="primary-button">Add to my gaps <span>→</span></button></form></div><div className="panel soft-panel"><div className="eyebrow">A BETTER WAY TO DIAGNOSE</div><h3>Use evidence, not guesswork.</h3><p>Try a practice question. Incorrect answers are automatically saved in your Mistake Notebook and revision queue.</p><button className="secondary-button" onClick={() => setPage('Practice Lab')}>Try a diagnostic question</button></div></div><div className="panel list-panel"><div className="panel-head"><h3>Your concept gaps <span className="count">{data.gaps.length}</span></h3></div>{data.gaps.length ? data.gaps.map(g => <div className="list-row" key={g.id}><div className="list-symbol">◇</div><div className="list-main"><strong>{g.title}</strong><small>{g.subject} · Added {new Date(g.created).toLocaleDateString()}</small></div><button className="small-action" onClick={() => update({ revisions: [...data.revisions, { id: Date.now(), title: g.title, subject: g.subject, due: Date.now(), interval: 1 }] })}>Add to revision</button><button className="remove-button" onClick={() => update({ gaps: data.gaps.filter(x => x.id !== g.id) })}>×</button></div>) : <Empty title="No gaps captured yet" text="Add a topic you want to understand better. Your list is private to this device." />}</div></section>}
+        {screen==='Gap Finder'&&<section><SectionTitle eyebrow="DIAGNOSE BEFORE YOU GRIND" title="Find the gaps." description="Choose a path, run a short diagnostic and see what the available evidence says. No guessed mastery labels." action={<Tag tone="blue">Core engine</Tag>}/><div className="gap-layout"><div className="panel gap-setup"><div className="panel-heading"><div><div className="eyebrow">ASSESSMENT SETUP</div><h2>Build your diagnostic</h2></div><span className="setup-icon">◎</span></div><div className="field-grid"><div><label className="field-label">Class / level</label><input className="field-control" value={profile.classLevel} readOnly/></div><div><label className="field-label">Exam path</label><input className="field-control" value={profile.examGoals.join(', ')||profile.board} readOnly/></div><div><label className="field-label">Subject</label><select className="field-control" value={gapSetup.subject} onChange={e=>setGapSetup(s=>({...s,subject:e.target.value,chapter:''}))}>{profileSubjects.map(s=><option key={s}>{s}</option>)}</select></div><div><label className="field-label">Chapter</label><select className="field-control" value={gapSetup.chapter} onChange={e=>setGapSetup(s=>({...s,chapter:e.target.value}))}><option value="">All available chapters</option>{CURRICULUM_DEMO.filter(c=>c.classLevel===profile.classLevel&&c.subject===gapSetup.subject).map(c=><option key={c.chapter}>{c.chapter}</option>)}</select></div></div><div className="field-label">Diagnostic length</div><div className="mode-switch"><button className={gapSetup.mode==='quick'?'selected':''} onClick={()=>setGapSetup(s=>({...s,mode:'quick'}))}><strong>Quick check</strong><small>Up to 3 questions · 3–5 min</small></button><button className={gapSetup.mode==='full'?'selected':''} onClick={()=>setGapSetup(s=>({...s,mode:'full'}))}><strong>Full available set</strong><small>All matching demo questions</small></button></div><div className="pack-notice"><span>ⓘ</span><div><strong>{CONTENT_PACK.name} · v{CONTENT_PACK.version}</strong><small>This is a small demonstration pack with original sample questions. It does not represent complete board or entrance-exam coverage.</small></div></div><Button block onClick={startGapDiagnostic}>Start diagnostic <span>→</span></Button></div>
+            <div className="panel gap-report"><div className="eyebrow">YOUR CONCEPT REPORT</div><h2>Evidence, not assumptions.</h2>{evidence.length?evidence.slice(0,7).map(item=><div className="report-row" key={item.topic}><div className="report-label"><strong>{item.topic}</strong><Tag tone={item.status==='Needs attention'?'red':item.status==='Strong'?'green':'amber'}>{item.status}</Tag></div><div className="report-track"><i style={{width:(item.accuracy??0)+'%'}}/></div><small>{item.distinctQuestions} distinct questions · {item.accuracy===null?'No stable estimate':item.accuracy+'% latest distinct-question accuracy'}</small></div>):<EmptyState icon="⌁" title="No diagnostic evidence yet" text="Your report starts after the first assessment. Fewer than five distinct graded questions will be marked insufficient data."/>}</div></div>
+          <div className="panel prerequisites"><div><div className="eyebrow">CONCEPT CONNECTIONS</div><h2>Learn in the right order.</h2><p>Prerequisite links are shown only when the installed content pack explicitly defines them. This demonstration pack does not yet include a verified prerequisite map.</p></div><Tag tone="neutral">No unverified links shown</Tag></div></section>}
 
-          {page === 'ReviseOS' && <section><PageIntro eyebrow="REMEMBER WHAT YOU LEARN" title="Revision that sticks." text="A simple queue for concepts you need to revisit. Start small, return consistently."/><div className="revision-summary"><div><strong>{due}</strong><span>Due today</span></div><div><strong>{data.revisions.length}</strong><span>Total in queue</span></div><div><strong>1 · 3 · 7 · 21</strong><span>Suggested review rhythm (days)</span></div></div><div className="panel"><h3>Add something to revise</h3><form className="inline-form" onSubmit={addNote}><input value={note} onChange={e => setNote(e.target.value)} placeholder="Add a formula, definition, or concept..." /><button className="primary-button">Add item</button></form></div><div className="panel list-panel"><div className="panel-head"><h3>Revision queue</h3><span className="muted">{data.revisions.length} items</span></div>{data.revisions.length ? data.revisions.map(r => <div className="list-row" key={r.id}><div className="list-symbol violet-symbol">↻</div><div className="list-main"><strong>{r.title}</strong><small>{r.subject} · {r.due <= Date.now() ? 'Due now' : 'Scheduled'}</small></div><button className="small-action" onClick={() => update({ revisions: data.revisions.map(x => x.id === r.id ? { ...x, due: Date.now() + 3 * 86400000, interval: 3 } : x) })}>Reviewed · next in 3d</button><button className="remove-button" onClick={() => update({ revisions: data.revisions.filter(x => x.id !== r.id) })}>×</button></div>) : <Empty title="Nothing to revise yet" text="Add a topic above or answer a practice question incorrectly. It will appear here." />}</div></section>}
+        {screen==='ReviseOS'&&<section><SectionTitle eyebrow="RECALL THAT LASTS" title="ReviseOS." description="A flexible revision system for due concepts, upcoming reviews, flashcards and backlog recovery." action={<Tag tone="violet">Adaptive intervals</Tag>}/><div className="revision-overview"><div className="revision-highlight"><span>READY FOR REVIEW</span><strong>{dueRevisions.length}</strong><small>Due and overdue topics</small></div><div className="revision-mini"><span>Upcoming</span><strong>{upcomingRevisions.length}</strong><small>Scheduled for later</small></div><div className="revision-mini"><span>Flashcards</span><strong>{data.flashcards.length}</strong><small>Saved recall cards</small></div><div className="revision-mini"><span>Review rhythm</span><strong>1 · 3 · 7 · 14 · 30</strong><small>Suggested days, adapt to results</small></div></div>
+          <div className="tab-row">{['Due','Upcoming','All','Flashcards'].map(tab=><button key={tab} className={revisionTab===tab?'active':''} onClick={()=>setRevisionTab(tab)}>{tab}{tab==='Due'&&dueRevisions.length>0?<b>{dueRevisions.length}</b>:null}</button>)}<span className="tab-spacer"/><Button variant="soft" onClick={()=>setShowFlashcardForm(v=>!v)}>＋ New flashcard</Button></div>
+          {showFlashcardForm&&<form className="panel flashcard-form" onSubmit={addFlashcard}><h3>Create a recall card</h3><div className="field-grid"><div><label className="field-label">Front / prompt</label><input className="field-control" value={flashcardForm.front} onChange={e=>setFlashcardForm(f=>({...f,front:e.target.value}))} required placeholder="What do you want to recall?"/></div><div><label className="field-label">Back / answer</label><input className="field-control" value={flashcardForm.back} onChange={e=>setFlashcardForm(f=>({...f,back:e.target.value}))} required placeholder="The answer or key steps"/></div><div><label className="field-label">Topic</label><input className="field-control" value={flashcardForm.topic} onChange={e=>setFlashcardForm(f=>({...f,topic:e.target.value}))} placeholder="Topic name"/></div><div><label className="field-label">Subject</label><select className="field-control" value={flashcardForm.subject} onChange={e=>setFlashcardForm(f=>({...f,subject:e.target.value}))}>{profileSubjects.map(s=><option key={s}>{s}</option>)}</select></div></div><div className="form-actions"><Button type="button" variant="ghost" onClick={()=>setShowFlashcardForm(false)}>Cancel</Button><Button type="submit">Save flashcard</Button></div></form>}
+          {revisionTab==='Flashcards'?<div className="flashcard-grid">{data.flashcards.length?data.flashcards.map(card=><article className="flashcard" key={card.id}><div className="flashcard-top"><Tag tone="violet">{card.subject}</Tag><button className="icon-action" onClick={()=>patchData({flashcards:data.flashcards.filter(c=>c.id!==card.id)})}>×</button></div><div className="flashcard-content" onClick={()=>setFlippedCards(f=>({...f,[card.id]:!f[card.id]}))}><span>{flippedCards[card.id]?'ANSWER':'PROMPT'}</span><strong>{flippedCards[card.id]?card.back:card.front}</strong><small>Tap to flip</small></div><div className="flashcard-ratings"><button onClick={()=>rateFlashcard(card,'again')}>Again</button><button onClick={()=>rateFlashcard(card,'good')}>Got it</button><button onClick={()=>rateFlashcard(card,'easy')}>Easy</button></div></article>):<EmptyState title="No flashcards yet" text="Create a recall card from a formula, definition or concept you want to remember." action={<Button onClick={()=>setShowFlashcardForm(true)}>Create first card</Button>}/>}</div>:<div className="panel list-panel">{(revisionTab==='Due'?dueRevisions:revisionTab==='Upcoming'?upcomingRevisions:data.revisions).length?(revisionTab==='Due'?dueRevisions:revisionTab==='Upcoming'?upcomingRevisions:data.revisions).map(item=><div className="revision-row" key={item.id}><div className="revision-symbol">↻</div><div className="revision-item-main"><strong>{item.topic}</strong><small>{item.subject} · {item.reason||'Manual review'} · {item.reviewCount||0} reviews completed</small></div><div className="revision-date"><strong>{dueLabel(item.dueAt)}</strong><small>Interval: {item.intervalDays||1} day(s)</small></div><div className="revision-controls"><button onClick={()=>reviewRevision(item,'again','guessing')}>Again</button><button onClick={()=>reviewRevision(item,'hard','somewhat')}>Hard</button><button onClick={()=>reviewRevision(item,'good','sure')}>Good</button><button onClick={()=>reviewRevision(item,'easy','sure')}>Easy</button></div><button className="icon-action" aria-label="Remove revision" onClick={()=>{if(window.confirm('Remove this revision item?'))patchData({revisions:data.revisions.filter(r=>r.id!==item.id)})}}>×</button></div>):<EmptyState title={revisionTab==='Due'?'Nothing due right now':'Your revision list is empty'} text="Incorrect answers and manually added concepts can enter this queue. Missed items remain visible until you reschedule or remove them." action={<Button variant="soft" onClick={()=>navigate('Practice Lab')}>Build a revision queue</Button>}/>}</div>}</section>}
 
-          {page === 'Practice Lab' && <section><PageIntro eyebrow="LEARN BY RETRIEVING" title="Practice with purpose." text="A small starter set of illustrative questions. These are demonstrations, not a complete syllabus or PYQ collection."/><div className="practice-toolbar"><div className="segmented">{['All', 'Physics', 'Chemistry', 'Maths'].map(s => <button key={s} className={subject === s ? 'selected' : ''} onClick={() => { setSubject(s); setQuestionIndex(0); setSelected(null); setChecked(false) }}>{s}</button>)}</div><span className="muted">Question {(questionIndex % Math.max(questions.length, 1)) + 1} of {questions.length}</span></div>{question ? <div className="question-card"><div className="question-meta"><span className="tag">{question.subject}</span><span>{question.level} · Illustrative sample</span></div><h2>{question.question}</h2><div className="options">{question.options.map((o, i) => <button key={o} disabled={checked} className={'option ' + (checked && i === question.answer ? 'right' : checked && i === selected ? 'wrong' : selected === i ? 'chosen' : '')} onClick={() => setSelected(i)}><span className="option-letter">{String.fromCharCode(65 + i)}</span>{o}{checked && i === question.answer && <b>✓</b>}</button>)}</div>{checked && <div className={selected === question.answer ? 'feedback good' : 'feedback bad'}><strong>{selected === question.answer ? 'Correct. Nice work.' : 'Not quite. Learn from this one.'}</strong><p>{question.explain}</p></div>}<div className="question-footer"><span className="muted">Take your time. Understand the why.</span>{checked ? <button className="primary-button" onClick={nextQuestion}>Next question →</button> : <button className="primary-button" disabled={selected === null} onClick={markAnswer}>Check answer <span>→</span></button>}</div></div> : <Empty title="No questions in this filter" text="Choose another subject."/>}<p className="disclaimer">Starter demonstration content only. Curriculum coverage and question accuracy must be expanded and reviewed before exam use.</p></section>}
+        {screen==='AI Study Agent'&&<section><SectionTitle eyebrow="YOUR PERSONAL STUDY COMPANION" title="Study with clarity." description="One study interface with two honest modes: offline Smart Mode on every device, and optional on-device generative AI when the browser supports it." action={<Tag tone={localAIReady?'green':'blue'}>{localAIReady?'On-device AI':'Smart Mode active'}</Tag>}/><div className="ai-workspace"><div className="panel chat-panel"><div className="chat-header"><div className="agent-badge large">✳</div><div><strong>GapZero Study Agent</strong><small>{localAIReady?'Responses run on this device':'Offline rules + your saved study records'}</small></div><span className="mode-chip">{localAIReady?'LOCAL AI':'SMART MODE'}</span></div><div className="chat-body">{agentMessages.length===0?<div className="chat-welcome"><div className="chat-welcome-symbol">✳</div><h2>What are we working on?</h2><p>Get a concept hint, analyse your recent mistakes or plan a realistic study session.</p><div className="prompt-suggestions"><button onClick={()=>askAgent('plan','')}><span>◷</span><strong>Plan my day</strong><small>Use my available time</small></button><button onClick={()=>askAgent('revise','')}><span>↻</span><strong>What should I revise?</strong><small>Check my due topics</small></button><button onClick={()=>askAgent('analyze','')}><span>⌁</span><strong>Analyse my mistakes</strong><small>Find repeat patterns</small></button><button onClick={()=>setAgentAction('quiz')}><span>▤</span><strong>Quiz me</strong><small>Use installed demo content</small></button></div></div>:agentMessages.map((m,i)=><div className={cx('chat-message',m.role)} key={i}><div className="message-avatar">{m.role==='user'?'You':'✳'}</div><div className="message-bubble">{m.title&&<strong>{m.title}</strong>}<p>{m.text||m.body}</p>{m.mode&&<small>{m.mode}{m.limitation?' · Limited to verified installed content':''}</small>}</div></div>)}<div ref={agentEndRef}/></div><div className="chat-compose"><div className="agent-action-row">{[{id:'explain',label:'Explain'},{id:'hint',label:'Hint'},{id:'solve',label:'Guided solve'},{id:'quiz',label:'Quiz me'}].map(a=><button key={a.id} className={agentAction===a.id?'chosen':''} onClick={()=>setAgentAction(a.id)}>{a.label}</button>)}</div><form onSubmit={e=>{e.preventDefault();askAgent()}}><textarea rows="2" value={agentInput} onChange={e=>setAgentInput(e.target.value)} placeholder="Ask about a topic, paste a doubt or describe your mistake…"/><button className="send-button" disabled={!agentInput.trim()}>↑</button></form><div className="compose-note">Avoid sharing personal information. Smart Mode does not send your data anywhere.</div></div></div>
+            <aside className="ai-side"><div className="panel mode-panel"><div className="eyebrow">ACTIVE STUDY ENGINE</div><h3>Smart Mode</h3><div className="mode-status"><span className="status-pulse"/> Always available</div><p>Uses deterministic rules, installed explanations and your local study history. It is not a generative AI model and will say when it cannot solve a question.</p><Tag tone="green">Works offline after app load</Tag></div><div className="panel local-ai-panel"><div className="eyebrow">OPTIONAL GENERATIVE MODEL</div><h3>On-device AI</h3><p>{localAI.reason||'Checking browser and device compatibility…'}</p><div className="local-ai-status"><span className={cx('status-dot',localAI.status==='available'?'green-dot':localAI.status==='unsupported'?'muted-dot':'amber-dot')}/>{localAI.label}</div>{localAIProgress!==null&&<div className="download-progress"><i style={{width:localAIProgress+'%'}}/></div>}{localAI.status==='downloadable'&&!localAIReady?<Button block onClick={enableLocalAI}>Prepare model on this device</Button>:localAI.status==='available'&&!localAIReady?<Button block onClick={enableLocalAI}>Enable on-device AI</Button>:localAIReady?<Button block variant="soft" onClick={()=>{endLocalModel();setLocalAIReady(false);setLocalAI({status:'available',label:'Model available',reason:'The session was closed.'})}}>Disconnect session</Button>:<Button block variant="soft" disabled>Check device compatibility</Button>}<small className="ai-footnote">Model preparation starts only after you tap. No cloud AI fallback. Supported browser/device requirements vary.</small></div><div className="panel context-panel"><div className="eyebrow">YOUR STUDY CONTEXT</div><strong>{profile.classLevel}</strong><small>{profile.examGoals.join(' · ')}</small><small>{profileSubjects.join(', ')}</small><button className="text-action" onClick={editProfile}>Edit learning path →</button></div></aside></div></section>}
 
-          {page === 'Mistake Notebook' && <section><PageIntro eyebrow="TURN ERRORS INTO INSIGHT" title="Your mistake notebook." text="Incorrect practice answers are captured here so you can revisit the underlying idea."/><div className="panel list-panel">{data.mistakes.length ? data.mistakes.map(m => <div className="list-row" key={m.id}><div className="list-symbol orange-symbol">!</div><div className="list-main"><strong>{m.title}</strong><small>{m.detail}</small></div><button className="small-action" onClick={() => update({ mistakes: data.mistakes.map(x => x.id === m.id ? { ...x, resolved: !x.resolved } : x) })}>{m.resolved ? 'Reopen' : 'Mark reviewed'}</button><span className={m.resolved ? 'status-done' : 'status-open'}>{m.resolved ? 'Reviewed' : 'Open'}</span></div>) : <Empty title="No mistakes recorded" text="Your incorrect answers from Practice Lab will appear here automatically." />}</div></section>}
+        {screen==='Practice Lab'&&<section><SectionTitle eyebrow="DELIBERATE PRACTICE" title="Practice with purpose." description="Build a focused set from the content actually installed for your class and subjects." action={<Tag tone="blue">Original demo pack</Tag>}/>{session?<div className="practice-session"><div className="session-top"><div><Tag tone="blue">{session.source==='diagnostic'?'GAP FINDER DIAGNOSTIC':'PRACTICE SESSION'}</Tag><h2>{session.title}</h2><small>Question {session.index+1} of {session.questions.length}</small></div><div className="session-timer">{session.timed?<><span>TIME LEFT</span><strong>{Math.floor(secondsLeft/60).toString().padStart(2,'0')}:{(secondsLeft%60).toString().padStart(2,'0')}</strong></>:<><span>MODE</span><strong>Untimed</strong></>}</div></div><div className="session-progress"><i style={{width:((session.index+(session.checked?1:0))/session.questions.length*100)+'%'}}/></div><div className="question-card"><div className="question-tags"><Tag>{activeQuestion.subject}</Tag><Tag tone="neutral">{activeQuestion.chapter}</Tag><Tag tone={activeQuestion.difficulty==='Hard'?'red':'amber'}>{activeQuestion.difficulty}</Tag><span className="question-time">~{activeQuestion.time} min</span></div><h2>{activeQuestion.prompt}</h2><div className="answer-options">{activeQuestion.options.map((option,i)=><button key={i} disabled={session.checked} onClick={()=>setSession(s=>({...s,selected:i}))} className={cx('answer-option',session.selected===i&&'selected',session.checked&&i===activeQuestion.answer&&'answer-correct',session.checked&&session.selected===i&&!gradeQuestion(activeQuestion,session.selected).correct&&'answer-wrong')}><span>{String.fromCharCode(65+i)}</span>{option}{session.checked&&i===activeQuestion.answer&&<b>✓</b>}</button>)}</div>{!session.checked&&<div className="confidence-picker"><span>How confident are you?</span>{[{id:'sure',label:'Sure'},{id:'somewhat',label:'Somewhat'},{id:'guessing',label:'Guessing'}].map(x=><button key={x.id} className={session.confidence===x.id?'chosen':''} onClick={()=>setSession(s=>({...s,confidence:x.id}))}>{x.label}</button>)}</div>}{session.checked&&<div className={cx('answer-feedback',session.answers[session.answers.length-1]?.correct?'good':'needs-work')}><strong>{session.answers[session.answers.length-1]?.correct?'Correct. Keep going.':'Not quite. Use the explanation to repair the idea.'}</strong><p>{activeQuestion.explanation}</p><small>Saved to your local learning record{session.answers[session.answers.length-1]?.correct?'':' · Added to Mistake Notebook and ReviseOS'}</small></div>}<div className="question-actions"><span>{session.checked?'Your response is saved to this workspace.':'Choose one answer, then check it.'}</span>{session.checked?<Button onClick={nextQuestion}>{session.index===session.questions.length-1?'View results':'Next question →'}</Button>:<Button disabled={session.selected===null||(session.timed&&secondsLeft<=0)} onClick={checkCurrentAnswer}>Check answer <span>→</span></Button>}</div></div><button className="exit-session" onClick={()=>{if(window.confirm('Exit this session? Answers already checked are saved.'))finishCurrentSession()}}>Exit session</button></div>:sessionResult?<div className="panel result-panel"><div className="result-illustration">✳</div><div className="eyebrow">SESSION COMPLETE</div><h2>{sessionResult.title}</h2><p>Your checked answers have been saved to this device.</p><div className="result-stats"><div><strong>{sessionResult.answers.length}</strong><small>Attempted</small></div><div><strong>{sessionResult.answers.filter(a=>a.correct).length}</strong><small>Correct</small></div><div><strong>{sessionResult.answers.length?Math.round(sessionResult.answers.filter(a=>a.correct).length/sessionResult.answers.length*100)+'%':'—'}</strong><small>Accuracy</small></div></div><div className="result-actions">{sessionResult.wrongQuestions.length>0&&<Button onClick={()=>startPractice(sessionResult.wrongQuestions,{title:'Retest incorrect questions',source:'retest'})}>Retest incorrect ({sessionResult.wrongQuestions.length})</Button>}<Button variant="soft" onClick={()=>{setSessionResult(null);navigate('Dashboard')}}>Back to dashboard</Button></div></div>:<><div className="practice-config panel"><div className="panel-heading"><div><div className="eyebrow">BUILD YOUR SET</div><h2>Choose what to practise</h2></div><span className="setup-icon">▤</span></div><div className="field-grid"><div><label className="field-label">Subject</label><select className="field-control" value={filters.subject} onChange={e=>setFilters(f=>({...f,subject:e.target.value}))}><option>All</option>{profileSubjects.map(s=><option key={s}>{s}</option>)}</select></div><div><label className="field-label">Difficulty</label><select className="field-control" value={filters.difficulty} onChange={e=>setFilters(f=>({...f,difficulty:e.target.value}))}>{['All','Easy','Medium','Hard'].map(x=><option key={x}>{x}</option>)}</select></div></div><div className="practice-pack-info"><div><strong>{CONTENT_PACK.name}</strong><small>{currentQuestions.length} available sample questions for this selected path · Version {CONTENT_PACK.version}</small></div><Tag tone="amber">DEMO CONTENT</Tag></div><div className="practice-launch"><div><strong>{currentQuestions.filter(q=>(filters.subject==='All'||q.subject===filters.subject)&&(filters.difficulty==='All'||q.difficulty===filters.difficulty)).length} matching questions</strong><small>Untimed practice · instant explanation · mistakes saved automatically</small></div><Button onClick={startFilteredPractice}>Start practice <span>→</span></Button></div></div><div className="practice-note"><span>ⓘ</span><p>These are original demonstration questions, not verified PYQs or complete curriculum coverage. Unsupported class/chapter packs will be shown as unavailable rather than filled with invented content.</p></div><div className="panel history-panel"><div className="panel-heading"><div><div className="eyebrow">YOUR RECENT WORK</div><h2>Practice history</h2></div><span>{data.attempts.length} attempts</span></div>{data.attempts.length?data.attempts.slice(-6).reverse().map(a=><div className="recent-row" key={a.id}><span className={cx('result-dot',a.correct?'correct':'incorrect')}>{a.correct?'✓':'×'}</span><div><strong>{a.topic}</strong><small>{a.subject} · {fmtDate(a.date)}</small></div><Tag tone={a.correct?'green':'red'}>{a.correct?'Correct':'Incorrect'}</Tag></div>):<EmptyState title="No practice history yet" text="Your answers will appear here once you finish the first set."/>}</div></>}</section>}
 
-          {page === 'Analytics' && <section><PageIntro eyebrow="PROGRESS, MADE VISIBLE" title="See your progress." text="A transparent snapshot of activity recorded on this device. No predictions or inflated scores."/><div className="stat-grid"><Stat label="Attempts" value={data.attempts.length} meta="Total recorded answers" icon="▤"/><Stat label="Correct" value={correct} meta="Correct answers" icon="✓"/><Stat label="Accuracy" value={accuracy + '%'} meta="Correct ÷ total attempts" icon="◎"/><Stat label="Open mistakes" value={data.mistakes.filter(m => !m.resolved).length} meta="Still to review" icon="!" /></div><div className="panel analytics-panel"><div className="panel-head"><h3>Subject activity</h3><span className="muted">Recorded attempts</span></div>{['Physics', 'Chemistry', 'Maths'].map(s => { const total = data.attempts.filter(a => a.subject === s).length; const pct = data.attempts.length ? total / data.attempts.length * 100 : 0; return <div className="bar-row" key={s}><span>{s}</span><div className="bar-track"><i style={{ width: pct + '%' }}/></div><strong>{total}</strong></div> })}</div></section>}
-        </div>
-        <footer className="footer"><span>GAPZERO <b>·</b> FIND YOUR GAPS. MASTER EVERY CONCEPT.</span><span>Local-first by design · V1 in progress</span></footer>
-      </main>
+        {screen==='Mistake Notebook'&&<section><SectionTitle eyebrow="LEARN FROM THE MISS" title="Mistake Notebook." description="Every wrong answer is a chance to understand the pattern. Review, reflect and retest—do not just clear the list." action={<Tag tone="amber">{data.mistakes.filter(m=>!m.resolved).length} open</Tag>}/><div className="mistake-filters"><select className="field-control" value={filters.subject} onChange={e=>setFilters(f=>({...f,subject:e.target.value}))}><option>All</option>{profileSubjects.map(s=><option key={s}>{s}</option>)}</select><select className="field-control" value={filters.mistake} onChange={e=>setFilters(f=>({...f,mistake:e.target.value}))}><option>All</option>{MISTAKE_TYPES.map(s=><option key={s}>{s}</option>)}</select><select className="field-control" value={filters.status} onChange={e=>setFilters(f=>({...f,status:e.target.value}))}><option>Open</option><option>Reviewed</option><option>All status</option></select></div><div className="panel mistake-list">{data.mistakes.filter(m=>(filters.subject==='All'||m.subject===filters.subject)&&(filters.mistake==='All'||m.mistakeType===filters.mistake)&&(filters.status==='All status'||(filters.status==='Open'?!m.resolved:m.resolved))).length?data.mistakes.filter(m=>(filters.subject==='All'||m.subject===filters.subject)&&(filters.mistake==='All'||m.mistakeType===filters.mistake)&&(filters.status==='All status'||(filters.status==='Open'?!m.resolved:m.resolved))).slice().reverse().map(m=><article className="mistake-card" key={m.id}><div className="mistake-head"><div><Tag tone="red">{m.mistakeType}</Tag><span className="mistake-subject">{m.subject} · {m.chapter}</span></div><span className={m.resolved?'resolved-state':'open-state'}>{m.resolved?'Reviewed':'Open'}</span></div><h3>{m.topic}</h3><p className="mistake-question">{m.questionText}</p><div className="mistake-answer-grid"><div><small>YOUR ANSWER</small><strong>{m.selectedAnswer}</strong></div><div><small>CORRECT ANSWER</small><strong>{m.correctAnswer}</strong></div></div><p className="mistake-explanation">{m.explanation}</p><div className="mistake-edit-row"><select className="field-control compact-control" value={m.mistakeType} onChange={e=>saveMistake(m.id,{mistakeType:e.target.value})}>{MISTAKE_TYPES.map(x=><option key={x}>{x}</option>)}</select><input className="field-control reflection-input" placeholder="Your reflection: what will you do differently?" value={reflectionDrafts[m.id]??m.reflection} onChange={e=>setReflectionDrafts(d=>({...d,[m.id]:e.target.value}))}/><Button variant="soft" onClick={()=>saveMistake(m.id,{reflection:reflectionDrafts[m.id]??m.reflection})}>Save note</Button></div><div className="mistake-footer"><button className="text-action" onClick={()=>{if(!data.revisions.some(r=>r.topic===m.topic&&r.subject===m.subject)){patchData({revisions:[...data.revisions,makeRevisionItem({topic:m.topic,subject:m.subject,source:'mistake',reason:'Added from Mistake Notebook'})]});notify('Added to ReviseOS')}else notify('This topic is already in ReviseOS')}}>＋ Add to revision</button><button className="text-action" onClick={()=>saveMistake(m.id,{resolved:!m.resolved,reviewCount:(m.reviewCount||0)+1})}>{m.resolved?'Reopen':'Mark reviewed'}</button><button className="text-action danger-text" onClick={()=>{if(window.confirm('Delete this mistake record?'))patchData({mistakes:data.mistakes.filter(x=>x.id!==m.id)})}}>Delete</button></div></article>):<EmptyState icon="✎" title="No mistakes match this view" text="Incorrect answers from Practice Lab are recorded here with the question and explanation. You can also change the filters above." action={<Button variant="soft" onClick={()=>navigate('Practice Lab')}>Go to Practice Lab</Button>}/>}</div></section>}
 
-      {showBackup && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) setShowBackup(false) }}><div className="modal"><button className="modal-close" onClick={() => setShowBackup(false)}>×</button><div className="eyebrow">YOUR DATA, YOUR DEVICE</div><h2>Settings & backup</h2><p>GapZero stores this workspace in your browser’s local storage. Clearing browser data may erase it, so export a backup periodically.</p><div className="backup-actions"><button className="primary-button" onClick={exportBackup}>↓ Export JSON backup</button><label className="secondary-button file-label">↑ Restore from JSON<input type="file" accept="application/json,.json" onChange={e => importBackup(e.target.files?.[0])}/></label></div><div className="privacy-note"><span>●</span> No account, server sync, or cloud AI is used by this prototype.</div><button className="danger-link" onClick={() => { if (window.confirm('Delete all GapZero data stored in this browser? This cannot be undone unless you have a backup.')) { localStorage.removeItem('gapzero-v1'); setData(initial); setShowBackup(false); notify('Local data cleared') } }}>Delete local workspace data</button></div></div>}
-      {toast && <div className="toast">{toast}</div>}
-    </div>
-  )
+        {screen==='Analytics'&&<section><SectionTitle eyebrow="MEASURE REAL IMPROVEMENT" title="Progress, without guesswork." description="Only activity recorded in this workspace is shown. Mastery needs evidence; empty data is not replaced with sample scores." action={<Tag tone="green">Based on your records</Tag>}/><div className="metrics-grid analytics-metrics"><Metric label="All-time attempts" value={data.attempts.length} note="Checked answers" icon="▤"/><Metric label="All-time accuracy" value={accuracy===null?'—':accuracy+'%'} note="Correct ÷ all attempts" icon="◎" tint="violet"/><Metric label="Last 7 days" value={weekAttempts.length} note="Questions attempted" icon="◷" tint="mint"/><Metric label="Revision completion" value={data.revisions.length?Math.round(data.revisions.filter(r=>r.reviewCount>0).length/data.revisions.length*100)+'%':'—'} note="Items reviewed at least once" icon="↻" tint="amber"/></div><div className="analytics-grid"><div className="panel"><div className="panel-heading"><div><div className="eyebrow">WEEKLY PRACTICE</div><h2>Accuracy trend</h2></div><span>Last 7 days</span></div>{weekAttempts.length?<div className="week-chart">{Array.from({length:7},(_,i)=>{const day=new Date();day.setHours(0,0,0,0);day.setDate(day.getDate()-(6-i));const items=weekAttempts.filter(a=>new Date(a.date).toDateString()===day.toDateString());const pct=items.length?items.filter(a=>a.correct).length/items.length*100:0;return <div className="chart-day" key={i}><div className="chart-bars"><i style={{height:(items.length?Math.max(8,pct):3)+'%'}}/><b style={{height:(items.length?Math.max(8,100-pct):3)+'%'}}/></div><small>{day.toLocaleDateString('en-IN',{weekday:'short'})}</small><strong>{items.length?items.length+'Q':'—'}</strong></div>})}</div>:<EmptyState title="Not enough activity yet" text="Complete practice across the week to create a real accuracy trend. No sample chart is shown."/>}</div><div className="panel"><div className="panel-heading"><div><div className="eyebrow">TOPIC EVIDENCE</div><h2>Mastery estimates</h2></div></div>{evidence.length?evidence.map(e=><div className="mastery-row" key={e.topic}><div><strong>{e.topic}</strong><small>{e.subject} · {e.distinctQuestions}/5 distinct questions for a stable label</small></div><Tag tone={e.status==='Strong'?'green':e.status==='Needs attention'?'red':'amber'}>{e.status}</Tag></div>):<EmptyState title="No topic evidence yet" text="Start with Gap Finder or Practice Lab."/>}</div></div><div className="panel analytics-bottom"><div className="panel-heading"><div><div className="eyebrow">ERROR PATTERNS</div><h2>Most repeated mistake types</h2></div></div>{data.mistakes.length?MISTAKE_TYPES.map(type=>{const count=data.mistakes.filter(m=>m.mistakeType===type).length;return count?<div className="mistake-type-row" key={type}><span>{type}</span><div className="bar-track"><i style={{width:(count/Math.max(data.mistakes.length,1)*100)+'%'}}/></div><strong>{count}</strong></div>:null}):<EmptyState title="No mistakes recorded" text="Patterns will appear when practice attempts include incorrect answers."/>}</div><div className="analytics-disclaimer">Mastery status requires at least five distinct graded questions per topic. Repeated attempts on the same question do not count as separate evidence.</div></section>}
+
+        {screen==='Settings & Backup'&&<section><SectionTitle eyebrow="YOUR SPACE · YOUR CONTROL" title="Settings & privacy." description="Manage your study path, language, local AI and data stored in this browser."/><div className="settings-grid"><div className="panel settings-panel"><div className="settings-icon">◎</div><div><h2>Learning profile</h2><p>{profile.classLevel} · {profile.board} · {profile.examGoals.join(', ')}</p><small>{profileSubjects.join(', ')}</small></div><Button variant="soft" onClick={editProfile}>Edit profile</Button></div><div className="panel settings-panel"><div className="settings-icon violet-setting">✳</div><div><h2>Study Agent & AI</h2><p>Smart Mode is always available. Local generative AI is optional and device-dependent.</p><small>{localAI.label}</small></div><Button variant="soft" onClick={()=>navigate('AI Study Agent')}>Manage AI</Button></div><div className="panel settings-panel"><div className="settings-icon mint-setting">◈</div><div><h2>Local storage</h2><p>Your profile, answers, revisions and notes are saved in IndexedDB on this browser.</p><small>Same browser and origin only · No automatic cross-device sync</small></div><Tag tone={saveStatus==='saved'?'green':'amber'}>{saveStatus==='saved'?'Saved':'Saving'}</Tag></div></div>
+          <div className="panel backup-panel"><div className="panel-heading"><div><div className="eyebrow">PORTABILITY & SAFETY</div><h2>Backup & restore</h2></div><Tag tone="blue">Versioned JSON</Tag></div><p>Export your profile, practice history, revision schedule, flashcards, mistakes and notes. Keep the file private because it may contain your study reflections.</p><div className="backup-summary"><span>{data.attempts.length} attempts</span><span>{data.revisions.length} revisions</span><span>{data.mistakes.length} mistakes</span><span>{data.flashcards.length} flashcards</span><span>{data.notes.length} notes</span></div><div className="backup-actions"><Button onClick={exportBackup}>↓ Export backup</Button><Button variant="soft" onClick={()=>fileInput.current?.click()}>↑ Restore from file</Button><input ref={fileInput} type="file" accept=".json,application/json" hidden onChange={e=>inspectBackup(e.target.files?.[0])}/></div>{backupPreview&&<div className="restore-preview"><strong>Backup ready to restore</strong><p>{backupPreview.counts.attempts} attempts · {backupPreview.counts.revisions} revisions · {backupPreview.counts.mistakes} mistakes · {backupPreview.counts.flashcards} flashcards</p><div className="mode-switch"><button className={backupMode==='merge'?'selected':''} onClick={()=>setBackupMode('merge')}><strong>Merge</strong><small>Keep existing records and add non-duplicate items</small></button><button className={backupMode==='replace'?'selected':''} onClick={()=>setBackupMode('replace')}><strong>Replace</strong><small>Replace this browser’s workspace with the backup</small></button></div><div className="form-actions"><Button variant="ghost" onClick={()=>setBackupPreview(null)}>Cancel</Button><Button onClick={restoreBackup}>Confirm restore</Button></div></div>}</div>
+          <div className="panel privacy-panel"><div className="panel-heading"><div><div className="eyebrow">PRIVACY PROMISE</div><h2>Local by design.</h2></div><span className="privacy-shield">◈</span></div><div className="privacy-points"><p><b>01</b> No account, name, phone or email is required.</p><p><b>02</b> No student data is sent to a cloud AI provider.</p><p><b>03</b> Local AI model download is never started silently.</p><p><b>04</b> Your browser may clear local data; export a backup before clearing or changing devices.</p></div><p className="privacy-plain">Your study data is saved in this browser on this device. It does not automatically sync to another device.</p><button className="danger-link" onClick={resetWorkspace}>Delete local workspace data</button></div><div className="content-source-note"><strong>Installed content</strong><span>{CONTENT_PACK.name} · {CONTENT_PACK.status} · {CONTENT_PACK.source}</span><small>Content coverage is limited to the installed samples. Add reviewed, versioned packs to expand subjects and chapters.</small></div></section>}
+      </div>
+      <footer className="app-footer"><span>GAPZERO <b>·</b> FIND YOUR GAPS. MASTER EVERY CONCEPT.</span><span>{CONTENT_PACK.name} · Local-first workspace</span></footer>
+    </main>
+    {mobileMenu&&<button className="mobile-dismiss" aria-label="Close menu" onClick={()=>setMobileMenu(false)}/>}
+    {toast&&<div className="toast-message">{toast}</div>}
+  </div>
 }
-
-function Stat({ label, value, meta, icon }) { return <div className="stat-card"><div className="stat-top"><span>{label}</span><i>{icon}</i></div><strong>{value}</strong><small>{meta}</small></div> }
-function ToolCard({ icon, tint, title, text, action, onClick }) { return <div className="tool-card"><div className={'tool-icon ' + tint}>{icon}</div><h3>{title}</h3><p>{text}</p><button className="text-button" onClick={onClick}>{action} →</button></div> }
-function PageIntro({ eyebrow, title, text }) { return <div className="page-intro"><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{text}</p></div> }
-function Empty({ title, text }) { return <div className="empty-state"><span>✳</span><strong>{title}</strong><p>{text}</p></div> }
-
 export default App
